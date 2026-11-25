@@ -1,32 +1,17 @@
-name: Build ipq50xx
+name: Build ipq50xx (AX55 v1)
 
-# Builds the sysupgrade images for every qualcommax/ipq50xx board, in two memory groups,
-# and publishes them together with the build's own kernel module repository:
-#   draft release -> build std + build 256m -> kmod repositories (gh-pages) -> publish -> prune
+# Trimmed fork of kuncy7/openwrt-nss-edma build-ipq50xx.yml:
+#   - one memory group only (GROUP below), no matrix
+#   - uploads sysupgrade + factory/initramfs images of the AX55 v1 if they were built
+#   - kmod repository is published to gh-pages as before
 #
-# Images go to a GitHub release tagged ipq50xx-YYYY.MM.DD. Sysupgrade only: a board is
-# expected to run OpenWrt already. The exceptions publish initramfs-factory.ubi: the Xiaomi
-# AX3000T v2 in the 256m group, whose first install from stock runs from a RAM-booted
-# initramfs, and the TP-Link Archer AX55 v1 in the std group, whose units with the
-# RTL8367S-VB switch have no wired network on an image without its driver. An image of this
-# build written to the inactive UBI slot from a root shell on stock boots one without UART.
-# Upgrades of an installed board are ordinary sysupgrades. The H3C Magic boards (BX54 EU in
-# std, NX30 and RC3000 in 256m) also get their factory images, for the first install from
-# the stock web UI.
-#
-# Kernel modules: a kmod depends on kernel=<version>~<vermagic>, so it can only be installed on
-# an image from the same build. Each build's bin/targets/.../packages/ is therefore published on
-# the gh-pages branch under <tag>/<group>/, and the image lists exactly that directory in
-# /etc/apk/repositories.d/distfeeds.list. The official target and kmods feeds are left out on
-# purpose: their kernel is a different build and nothing in them installs here.
-#
-# Board lists and memory profiles: .github/ci/ipq50xx/*.config.
+# Board list / extra kmods: .github/ci/ipq50xx/*.config (std.config, kmods-extra.config)
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (empty = ipq50xx-YYYY.MM.DD, UTC date)"
+        description: "Release tag (empty = ArcherAX55v1-YYYY.MM.DD, UTC date)"
         required: false
         type: string
 
@@ -39,12 +24,11 @@ permissions:
 
 env:
   TARGET: qualcommax/ipq50xx
-  RELEASE_PREFIX: ipq50xx
-  KEEP_RELEASES: "5"             # releases to keep: the current one and the four before it
-  KEEP_PAGES: "8"                # kmod repository directories on gh-pages (about 12 MB each)
-  # What counts as one of these builds when pruning. Anchored, so older releases whose tag also
-  # starts with "ipq50xx-" (ipq50xx-b3000-2026.09.07) are never touched.
-  TAG_RE: '^ipq50xx-[0-9]{4}\.[0-9]{2}\.[0-9]{2}(-[0-9]+)?$'
+  RELEASE_PREFIX: ArcherAX55v1
+  GROUP: std                     # <-- which config group holds the AX55 v1 (std or 256m)
+  BOARD: tplink_archer-ax55-v1   # <-- name as it appears in the image file names
+  KEEP: "3"
+  TAG_RE: '^ArcherAX55v1-[0-9]{4}\.[0-9]{2}\.[0-9]{2}(-[0-9]+)?$'
   CI_DIR: .github/ci/ipq50xx
   PAGES_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
 
@@ -69,62 +53,37 @@ jobs:
           if [[ -z "$tag" ]]; then
             base="${RELEASE_PREFIX}-$(date -u +%Y.%m.%d)"
             tag="$base"; n=2
-            # a second build on the same day gets a suffix: ipq50xx-2026.09.24-2
             while gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
                   || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; do
               tag="${base}-${n}"; n=$((n+1))
             done
           fi
-          boards() { grep -oE 'DEVICE_[a-z0-9_-]+=y' "${CI_DIR}/$1.config" | sed 's/^DEVICE_//;s/=y$//' | tr '\n' ' '; }
           {
-            echo "NSS offload for IPQ5018 boards (\`qualcommax/ipq50xx\`), built from \`${GITHUB_SHA::12}\`."
-            echo "What is in it and how the plane comes up: README.ipq50xx.md in the repository."
+            echo "NSS offload build for ${BOARD} (\`${TARGET}\`), built from \`${GITHUB_SHA::12}\`."
             echo
-            echo "**Sysupgrade images only.** Flash \`openwrt-qualcommax-ipq50xx-<device>-squashfs-sysupgrade.bin\`"
-            echo "over a running OpenWrt; there is no factory image. A board that is not in official"
-            echo "OpenWrt needs a plain OpenWrt image built from this tree first."
-            echo
-            echo "**SQM in the NSS firmware** (\`sqm-scripts-nss\`, script \`nss-edma.qos\`) is in the image and"
-            echo "switched off: set the queue in \`/etc/config/sqm\` to your WAN port and \`enabled '1'\`"
-            echo "(README, section SQM)."
-            echo
-            echo "**Extra kernel modules** (wireguard, tun, USB storage and USB network,"
-            echo "filesystems, GRE/VXLAN/L2TP, bonding, nft extras) are not in the image."
-            echo "\`apk update && apk add kmod-<name>\` fetches them from this build's own repository,"
-            echo "which the image already lists: \`${PAGES_BASE}/${tag}/<group>/packages.adb\`."
-            echo "Kernel modules only install on an image from the same build, so a repository stays"
-            echo "online for the newest ${KEEP_PAGES} builds, past its release (the newest ${KEEP_RELEASES} are kept)."
-            echo
-            echo "| group | memory | boards |"
-            echo "|---|---|---|"
-            echo "| std | 512 MB / 1 GB | $(boards std)|"
-            echo "| 256m | 256 MB | $(boards 256m)|"
+            echo "Extra kernel modules are not in the image:"
+            echo "\`apk update && apk add kmod-<name>\` fetches them from this build's own repository:"
+            echo "\`${PAGES_BASE}/${tag}/${GROUP}/packages.adb\`."
+            echo "Kernel modules only install on an image from the same build."
           } >release_notes.md
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
             --title "$tag" --notes-file release_notes.md >&2
           echo "tag=$tag" >>"$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.group }}
+    name: Build ${{ github.event.repository.name }}
     needs: release
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        # One group = one ath11k/nss-drv memory profile, which is image-wide.
-        group: [std, 256m]
     env:
       GH_TOKEN: ${{ github.token }}
-      GROUP: ${{ matrix.group }}
       TAG: ${{ needs.release.outputs.tag }}
     steps:
       - name: Free disk space
         run: |
           set -euo pipefail
-          # A full group needs about 26 GB (build_dir, dl, staging_dir, toolchain).
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
             /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force >/dev/null 2>&1 || true
@@ -139,19 +98,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0          # scripts/getver.sh derives the revision from history
+          fetch-depth: 0
 
       - name: Feeds
         run: |
           set -euo pipefail
-          # feeds.conf.default already names the nss feed (kuncy7/nss-packages;ipq50xx-rebase)
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Package repositories for the image
         run: |
           set -euo pipefail
-          # The files/ overlay wins over the list FeedSourcesAppendAPK generates.
           mkdir -p files/etc/apk/repositories.d
           {
             echo "${PAGES_BASE}/${TAG}/${GROUP}/packages.adb"
@@ -176,9 +133,6 @@ jobs:
             printf '::error::defconfig dropped %s\n' "${dropped[@]}"
             exit 1
           fi
-          # A board's own packages (DEVICE_PACKAGES) are only built if defconfig could select
-          # them; one that depends on a package nobody enabled stays off without a word and the
-          # build then fails at the very end, when that board's rootfs is assembled.
           python3 - <<'PY'
           import os, re, sys
           cfg = open('.config').read()
@@ -200,9 +154,6 @@ jobs:
           PY
           ./scripts/diffconfig.sh >"diffconfig-${GROUP}.txt"
 
-      # Source archives rarely change between releases, and the OpenWrt mirrors that git-based
-      # packages are fetched from first can be slow (2026-11-07: ath11k-firmware at ~70 kB/s).
-      # Start from the newest dl/ this group saved, falling back to the other group's.
       - name: Restore source archives
         id: dl-restore
         uses: actions/cache/restore@v6
@@ -213,18 +164,11 @@ jobs:
             dl-ipq50xx-${{ env.GROUP }}-
             dl-ipq50xx-
 
-      # A source that is not on the mirrors is fetched with git, and a stalled clone would hold
-      # the step for hours: git gives up on a transfer that stays below 1 kB/s for a minute,
-      # every attempt has a time limit, and three failed attempts fail the step instead of
-      # leaving the download to the build.
       - name: Download sources
         timeout-minutes: 75
         env:
           GIT_HTTP_LOW_SPEED_LIMIT: 1000
           GIT_HTTP_LOW_SPEED_TIME: 60
-          # scripts/download.pl gives curl only --connect-timeout: a server that accepts the
-          # connection and then stops sending keeps curl waiting until the 20 minute limit,
-          # without trying the next mirror. Abort a transfer below 1 kB/s for 60 s instead.
           CURL_OPTIONS: --speed-limit 1000 --speed-time 60
         run: |
           set -euo pipefail
@@ -235,8 +179,6 @@ jobs:
               break
             fi
             echo "::warning::download attempt $attempt failed or ran into the 20 minute limit"
-            # download.pl writes to <file>.dl until the transfer is complete: what is left
-            # names the source that hung
             find dl -maxdepth 1 -name '*.dl' -printf '::warning::unfinished download: %f (%s bytes)\n' || true
             sleep 5
           done
@@ -245,8 +187,6 @@ jobs:
             exit 1
           fi
 
-      # Save dl/ right after the download, so a later build failure does not lose it. The key is
-      # the list of archives: an unchanged list matches the restored entry and nothing is saved.
       - name: Compute source archive key
         id: dl-key
         run: |
@@ -262,8 +202,6 @@ jobs:
           path: dl
           key: ${{ steps.dl-key.outputs.key }}
 
-      # The ccache key covers the toolchain tree and the host compiler; a change there starts
-      # from an empty cache (the same scheme as JuliusBairaktaris/Qualcommax_NSS_Builder).
       - name: Compute ccache key
         id: ccache
         run: |
@@ -287,7 +225,6 @@ jobs:
         run: |
           set -euo pipefail
           if ! make -j"$(nproc)"; then
-            # the parallel log interleaves; a serial pass over what is left shows the failure
             make -j1 V=s 2>&1 | tail -300
             exit 1
           fi
@@ -297,12 +234,7 @@ jobs:
       - name: Add luci-app-nss and wpad-mesh-mbedtls to the build's repository
         run: |
           set -euo pipefail
-          # The base feed directory is not published; the image lists only this build's target
-          # repository and the official feeds. luci-app-nss is not in the official feeds at all,
-          # and their wpad-mesh-mbedtls lacks this tree's hostapd patches (the mesh peering after
-          # a radio firmware restart) - README tells std users to install it from here.
           cp bin/packages/*/base/luci-app-nss-*.apk "bin/targets/${TARGET}/packages/"
-          # and its translations, luci-i18n-nss-<lang>, once po/<lang>/nss.po exists for one
           for f in bin/packages/*/base/luci-i18n-nss-*.apk; do [ -e "$f" ] && cp "$f" "bin/targets/${TARGET}/packages/"; done
           if grep -q '^CONFIG_PACKAGE_wpad-mesh-mbedtls=[my]' .config; then
             cp bin/packages/*/base/wpad-mesh-mbedtls-*.apk "bin/targets/${TARGET}/packages/"
@@ -313,6 +245,8 @@ jobs:
         run: |
           set -euo pipefail
           out="bin/targets/${TARGET}"
+          echo "--- files in ${out} ---"
+          ls -la "$out"
           n_img=$(find "$out" -maxdepth 1 -name 'openwrt-*-squashfs-sysupgrade.bin' | wc -l)
           n_dev=$(grep -c '^CONFIG_TARGET_DEVICE_.*=y' .config)
           echo "sysupgrade images: $n_img of $n_dev boards"
@@ -322,8 +256,6 @@ jobs:
             || { echo "::error::kmod-wireguard missing from the repository"; exit 1; }
           compgen -G "$out/packages/luci-app-nss-*.apk" >/dev/null \
             || { echo "::error::luci-app-nss missing from the repository"; exit 1; }
-          # one luci-i18n-nss-<lang> per translation in the tree; a po/<lang> without its
-          # CONFIG_LUCI_LANG_<lang>=m in kmods-extra.config builds no package (10.18 shipped so)
           n_po=$(find package/nss/luci-app-nss/po -mindepth 1 -maxdepth 1 -type d ! -name templates | wc -l)
           n_i18n=$(find "$out/packages" -maxdepth 1 -name 'luci-i18n-nss-*.apk' | wc -l)
           echo "luci-app-nss translations: $n_i18n packages for $n_po in the tree"
@@ -333,6 +265,9 @@ jobs:
             compgen -G "$out/packages/wpad-mesh-mbedtls-*.apk" >/dev/null \
               || { echo "::error::wpad-mesh-mbedtls missing from the repository"; exit 1; }
           fi
+          # your extra kmod must have been built
+          compgen -G "$out/packages/kmod-nf-conntrack-netlink-*.apk" >/dev/null \
+            || { echo "::error::kmod-nf-conntrack-netlink missing from the repository"; exit 1; }
           kernel=$(find "$out/packages" -maxdepth 1 -name 'kernel-*.apk' -printf '%f\n')
           echo "repository: $(find "$out/packages" -maxdepth 1 -name '*.apk' | wc -l) packages, ${kernel}"
 
@@ -340,26 +275,17 @@ jobs:
         run: |
           set -euo pipefail
           out="bin/targets/${TARGET}"
-          # initramfs-factory.ubi only where a board uses it for its first install: the Xiaomi
-          # AX3000T v2 and the Archer AX55 v1 (RTL8367S-VB units). Other boards build one too
-          # (the Archer AX53/AX58 v2), but install otherwise.
-          names=(-name 'openwrt-*-squashfs-sysupgrade.bin'); sums='sysupgrade\.bin'
-          # The H3C Magic boards install from the stock web UI with a factory image (one per
-          # stock model name on the RC3000s), in both groups.
-          names+=(-o -name 'openwrt-*-h3c_magic-*-squashfs-factory-*.bin')
-          sums+='|h3c_magic-.*-squashfs-factory-.*\.bin'
-          if [[ "$GROUP" == 256m ]]; then
-            names+=(-o -name 'openwrt-*-xiaomi_mi-router-ax3000t-v2-initramfs-factory.ubi')
-            sums+='|xiaomi_mi-router-ax3000t-v2-initramfs-factory\.ubi'
-          else
-            names+=(-o -name 'openwrt-*-tplink_archer-ax55-v1-initramfs-factory.ubi')
-            sums+='|tplink_archer-ax55-v1-initramfs-factory\.ubi'
-          fi
-          mapfile -t assets < <(find "$out" -maxdepth 1 -type f \( "${names[@]}" \))
-          grep -E "$sums" "$out/sha256sums" >"sha256sums-${GROUP}.txt"
+          # sysupgrade always; factory and initramfs images of this board only if they were built
+          mapfile -t assets < <(find "$out" -maxdepth 1 -type f \( \
+              -name 'openwrt-*-squashfs-sysupgrade.bin' \
+              -o -name "openwrt-*-${BOARD}-*factory*" \
+              -o -name "openwrt-*-${BOARD}-*initramfs*" \) | sort)
+          printf 'uploading: %s\n' "${assets[@]}"
+          : >"sha256sums-${GROUP}.txt"
+          for a in "${assets[@]}"; do
+            grep -F "$(basename "$a")" "$out/sha256sums" >>"sha256sums-${GROUP}.txt" || true
+          done
           cp "$out/config.buildinfo" "config-${GROUP}.buildinfo"
-          # The feed commits this build used. feeds.conf.default names the nss feed by branch,
-          # so the tag of this tree alone does not say which feed code is in the images.
           ./scripts/feeds list -fs >"feeds-${GROUP}.buildinfo"
           cat "feeds-${GROUP}.buildinfo"
           for attempt in 1 2 3; do
@@ -378,13 +304,13 @@ jobs:
       - name: Keep the package repository for the pages job
         uses: actions/upload-artifact@v4
         with:
-          name: packages-${{ matrix.group }}
+          name: packages-${{ env.GROUP }}
           path: bin/targets/${{ env.TARGET }}/packages/
           retention-days: 3
           if-no-files-found: error
 
   pages:
-    name: Publish kmod repositories
+    name: Publish kmod repository
     needs: [release, build]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -416,39 +342,28 @@ jobs:
           set -euo pipefail
           cd site
           for d in "${TAG}"/packages-*; do mv "$d" "${TAG}/${d##*/packages-}"; done
-          for g in std 256m; do
-            [[ -f "${TAG}/${g}/packages.adb" ]] || { echo "::error::${TAG}/${g} has no package index"; exit 1; }
-          done
-          # keep the newest KEEP_PAGES build directories; the tag is a date, so name order is time order
+          [[ -f "${TAG}/${GROUP}/packages.adb" ]] || { echo "::error::${TAG}/${GROUP} has no package index"; exit 1; }
           mapfile -t dirs < <(find . -maxdepth 1 -type d -printf '%f\n' | grep -E "$TAG_RE" | sort -r)
-          for old in "${dirs[@]:${KEEP_PAGES}}"; do
+          for old in "${dirs[@]:${KEEP}}"; do
             echo "prune $old"
             rm -rf "$old"
           done
           {
             echo "# Kernel module repositories"
             echo
-            echo "One directory per build of \`${GITHUB_REPOSITORY}\`, one subdirectory per memory group."
+            echo "One directory per build of \`${GITHUB_REPOSITORY}\`."
             echo "An image lists its own; kernel modules only install on an image from the same build."
             echo
-            # releases are pruned sooner than these directories: link only the ones still kept
-            n=0
             for t in $(find . -maxdepth 1 -type d -printf '%f\n' | grep -E "$TAG_RE" | sort -r); do
-              n=$((n + 1))
-              if (( n <= KEEP_RELEASES )); then
-                echo "- ${t}: [std](${t}/std/packages.adb), [256m](${t}/256m/packages.adb)," \
-                  "[release](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${t})"
-              else
-                echo "- ${t}: [std](${t}/std/packages.adb), [256m](${t}/256m/packages.adb) (release removed)"
-              fi
+              echo "- ${t}: [${GROUP}](${t}/${GROUP}/packages.adb)," \
+                "[release](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${t})"
             done
           } >index.md
           touch .nojekyll
-          # one commit per build: the branch holds binaries, its history is of no use
           git checkout -q --orphan gh-pages-new
           git add -A
           git -c user.name=github-actions -c user.email=github-actions@github.com \
-            commit -qm "kernel module repositories, newest ${TAG}"
+            commit -qm "kernel module repository, newest ${TAG}"
           git push -q --force origin gh-pages-new:gh-pages
 
   publish:
@@ -469,7 +384,6 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$BUILD_RESULT" != "success" || "$PAGES_RESULT" != "success" ]]; then
-            # a release missing a group, or without its kmod repository, is worse than none
             gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
             echo "::error::build=$BUILD_RESULT pages=$PAGES_RESULT; draft release discarded"
             exit 1
@@ -480,7 +394,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --exclude-drafts --json tagName,publishedAt \
-            | jq -r --arg re "$TAG_RE" --argjson keep "$KEEP_RELEASES" \
+            | jq -r --arg re "$TAG_RE" --argjson keep "$KEEP" \
                 '[.[] | select(.tagName | test($re))] | sort_by(.publishedAt) | reverse | .[$keep:][] | .tagName' \
             | while read -r old; do
                 echo "delete release $old"
